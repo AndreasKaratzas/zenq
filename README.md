@@ -1,4 +1,4 @@
-# Code Preparation for Interviews
+# ZenQ: AI Simulator for AMD Accelerators
 
 ### Setup `poetry` for Python package management
 
