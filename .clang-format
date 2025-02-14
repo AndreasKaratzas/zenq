@@ -1,0 +1,62 @@
+---
+# C/C++ Code Style Configuration
+# Based on Microsoft Style Guidelines with custom modifications
+# Optimized for CUDA/C++17 development
+
+# Base Style
+BasedOnStyle: Microsoft
+Language: Cpp
+Standard: c++17
+
+# Indentation
+IndentWidth: 4                    # Number of spaces for each indentation level
+TabWidth: 4                       # Width of tab character
+UseTab: Never                     # Always use spaces instead of tabs
+ContinuationIndentWidth: 4        # Indentation for line continuations
+NamespaceIndentation: None        # Don't indent inside namespaces
+AccessModifierOffset: -4          # Offset for access modifiers relative to class block
+IndentPPDirectives: BeforeHash    # Indent preprocessor directives (#pragma, etc.)
+
+# Line Length and Breaking
+ColumnLimit: 100                  # Maximum line length
+AlwaysBreakTemplateDeclarations: Yes  # Always break after template declarations
+BreakConstructorInitializers: BeforeColon
+BreakBeforeBraces: Attach        # Attach braces to their control statements
+
+# Alignment and Spacing
+AlignConsecutiveAssignments: true    # Align consecutive assignments
+AlignConsecutiveDeclarations: true   # Align consecutive declarations
+AlignTrailingComments: true          # Align trailing comments
+DerivePointerAlignment: false        # Don't derive pointer alignment
+PointerAlignment: Left               # Place asterisk next to type
+SpaceAfterTemplateKeyword: true      # Space after 'template'
+SpaceBeforeParens: ControlStatements # Space before control statement parentheses
+SpacesInParentheses: false          # No spaces inside parentheses
+SpaceAfterCStyleCast: false         # No space after C-style cast
+SpaceBeforeAssignmentOperators: true # Space around assignment operators
+SpaceBeforeCtorInitializerColon: true
+SpaceBeforeInheritanceColon: true
+SpaceInEmptyParentheses: false
+SpacesInCStyleCastParentheses: false
+SpacesInContainerLiterals: false
+SpacesInSquareBrackets: false
+SpacesBeforeTrailingComments: 1
+
+# Function Formatting
+AllowShortFunctionsOnASingleLine: Empty  # Only empty functions on single line
+BinPackArguments: false                  # Don't bin-pack function arguments
+BinPackParameters: false                 # Don't bin-pack function parameters
+
+# Control Flow Formatting
+AllowShortIfStatementsOnASingleLine: false  # No single-line if statements
+AllowShortLoopsOnASingleLine: false         # No single-line loops
+
+# Other Formatting
+KeepEmptyLinesAtTheStartOfBlocks: false  # Remove empty lines at start of blocks
+MaxEmptyLinesToKeep: 1                   # Maximum consecutive empty lines
+ReflowComments: true                     # Reflow comments to fit line length
+SortIncludes: true                       # Sort include statements
+
+# Example usage:
+# To format a file: clang-format -i filename.cpp
+# To format all files: find . -name '*.cpp' -o -name '*.h' -o -name '*.cu' | xargs clang-format -i
