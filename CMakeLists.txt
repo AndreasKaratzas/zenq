@@ -1,43 +1,102 @@
-cmake_minimum_required(VERSION 3.20)
-project(kernel_compute
-    VERSION 0.1.0
-    LANGUAGES CXX CUDA
-    DESCRIPTION "High-performance kernel computation library"
-)
+cmake_minimum_required(VERSION 3.18)
+project(hpc_tensor LANGUAGES CXX)
 
-# Set C++ standard
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_STANDARD 20)
-set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-# Export compilation database for tooling
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Build type
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release)
+# CUDA support
+option(CUDA_ENABLED "Enable CUDA support" OFF)
+
+# Check for CUDA
+if(CUDA_ENABLED)
+    include(CheckLanguage)
+    check_language(CUDA)
+    if(CMAKE_CUDA_COMPILER)
+        enable_language(CUDA)
+        set(CMAKE_CUDA_STANDARD 14)
+        set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+        find_package(CUDAToolkit REQUIRED)
+        add_definitions(-DCUDA_ENABLED)
+    else()
+        message(FATAL_ERROR "CUDA compiler not found. Please install CUDA or disable CUDA support.")
+    endif()
 endif()
 
-# Find CUDA
-find_package(CUDAToolkit REQUIRED)
+# Handle GTest dependency
+find_package(GTest QUIET)
+if(NOT GTest_FOUND)
+    include(FetchContent)
+    FetchContent_Declare(
+        googletest
+        GIT_REPOSITORY https://github.com/google/googletest.git
+        GIT_TAG release-1.12.1
+    )
+    # For Windows: Prevent overriding the parent project's compiler/linker settings
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googletest)
+endif()
 
-# Set CUDA architectures for V100
-set(CMAKE_CUDA_ARCHITECTURES 70)
+# Check for AVX support
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
+check_cxx_compiler_flag("-mavx512f" COMPILER_SUPPORTS_AVX512F)
 
-# Compiler options
-add_compile_options(
-    $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic>
-    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra>
+if(COMPILER_SUPPORTS_AVX512F)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx512f")
+elseif(COMPILER_SUPPORTS_AVX2)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx2")
+endif()
+
+# Create library
+add_library(tensor
+    src/backend/common/tensor.cpp
 )
 
-# Add subdirectories
-add_subdirectory(src)
-add_subdirectory(tests)
+target_include_directories(tensor
+    PUBLIC
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
 
-# Installation
+if(CMAKE_CUDA_COMPILER)
+    target_link_libraries(tensor
+        PUBLIC
+            CUDA::cudart
+    )
+endif()
+
+# Tests
+enable_testing()
+add_executable(tensor_test 
+    test/backend.cpp
+)
+
+target_link_libraries(tensor_test
+    PRIVATE
+        tensor
+        GTest::GTest
+        GTest::Main
+)
+
+# Install rules
 include(GNUInstallDirs)
-install(
-    DIRECTORY ${CMAKE_SOURCE_DIR}/include/
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-    FILES_MATCHING PATTERN "*.hpp" PATTERN "*.cuh"
+install(TARGETS tensor
+    EXPORT tensor-targets
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(FILES
+    include/tensor.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/hpc
+)
+
+install(EXPORT tensor-targets
+    FILE tensor-targets.cmake
+    NAMESPACE hpc::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/tensor
 )
