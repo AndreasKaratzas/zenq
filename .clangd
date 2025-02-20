@@ -1,0 +1,37 @@
+CompileFlags:
+  Add:
+    [
+      -I/home/iraklis/Documents/andreas/workspace/zenq/include,
+      -I/usr/include/python3.11 -I/home/iraklis/Documents/andreas/workspace/zenq/.venv/lib/python3.11/site-packages/pybind11/include --cuda-path=/usr/local/cuda -Wall,
+      -Wextra,
+      -std=c++20,
+    ]
+  Remove:
+    [
+      -W*,
+      -std=*,
+      -rdc=true,
+      -forward-unknown-to-host-compiler,
+      --options-file,
+      -Xcompiler=-fPIC,
+      -arch=native,
+      --extended-lambda,
+      --default-stream,
+      --expt-relaxed-constexpr,
+      --use_fast_math,
+      --generate-code*,
+      --compiler-options,
+    ]
+  CompilationDatabase: "/home/iraklis/Documents/andreas/workspace/zenq/build"
+Index:
+  Background: Build
+Diagnostics:
+  ClangTidy:
+    Add: modernize*
+    Remove: modernize-use-trailing-return-type
+  UnusedIncludes: Strict
+InlayHints:
+  Designators: Yes
+  Enabled: Yes
+  ParameterNames: Yes
+  DeducedTypes: Yes
