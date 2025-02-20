@@ -1,8 +1,7 @@
 #include "compute/cuda/tensor.cuh"
 #include <stdexcept>
 
-namespace hpc::compute::cuda {
-namespace impl {
+namespace hpc::compute::cuda::impl {
 
 void check_cuda_error(cudaError_t error, const char* file, int line) {
     if (error != cudaSuccess) {
@@ -18,16 +17,17 @@ __host__ TensorData<T> create_tensor(const std::size_t* dims,
     TensorData<T> tensor;
     tensor.data   = nullptr;
     tensor.rank   = rank;
-    tensor.size   = 1;
+    tensor.size   = 0; // Initialize size to 0
     tensor.layout = layout;
-    tensor.dims.fill(1);
+    tensor.dims.fill(0); // Initialize all dimensions to 0
     tensor.strides.fill(0);
 
-    if (rank > 0) {
+    if (rank > 0 && dims != nullptr) {
         if (rank > TensorData<T>::MAX_DIMS) {
             throw std::invalid_argument("Too many dimensions");
         }
 
+        tensor.size = 1;
         for (std::size_t i = 0; i < rank; ++i) {
             tensor.dims[i] = dims[i];
             tensor.size *= dims[i];
@@ -46,7 +46,7 @@ __host__ TensorData<T> create_tensor(const std::size_t* dims,
 template <typename T>
 __host__ void destroy_tensor(TensorData<T>& tensor) {
     if (tensor.data) {
-        cudaFree(tensor.data);
+        check_cuda_error(cudaFree(tensor.data), __FILE__, __LINE__);
         tensor.data = nullptr;
     }
     tensor.rank = 0;
@@ -116,6 +116,9 @@ __host__ __device__ std::size_t compute_offset(const TensorData<T>& tensor,
 
 template <typename T>
 __host__ __device__ bool is_contiguous(const TensorData<T>& tensor) {
+    if (tensor.rank == 0)
+        return true;
+
     std::size_t expected_stride = 1;
     for (int i = tensor.rank - 1; i >= 0; --i) {
         if (tensor.strides[i] != expected_stride) {
@@ -144,5 +147,4 @@ INSTANTIATE_FOR_TYPE(unsigned int)
 
 #undef INSTANTIATE_FOR_TYPE
 
-} // namespace impl
-} // namespace hpc::compute::cuda
+} // namespace hpc::compute::cuda::impl

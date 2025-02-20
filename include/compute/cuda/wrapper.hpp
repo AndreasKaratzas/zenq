@@ -2,6 +2,7 @@
 
 #include "compute/cpp/tensor.hpp"
 #include "compute/cuda/tensor.cuh"
+#include <initializer_list>
 #include <vector>
 
 namespace hpc::compute::cuda {
@@ -14,7 +15,12 @@ public:
     // Constructor for empty tensor
     TensorWrapper() : tensor_data_(impl::create_tensor<T>(nullptr, 0)) {}
 
-    // Constructor with dimensions
+    // Constructor with initializer list
+    TensorWrapper(std::initializer_list<std::size_t> dims,
+                  MemoryLayout                       layout = MemoryLayout::RowMajor)
+        : TensorWrapper(std::vector<std::size_t>(dims.begin(), dims.end()), layout) {}
+
+    // Constructor with dimensions vector
     explicit TensorWrapper(const std::vector<std::size_t>& dims,
                            MemoryLayout                    layout = MemoryLayout::RowMajor)
         : tensor_data_(impl::create_tensor<T>(dims.data(), dims.size(), layout)) {}
@@ -34,6 +40,8 @@ public:
         other.tensor_data_.data = nullptr;
         other.tensor_data_.size = 0;
         other.tensor_data_.rank = 0;
+        other.tensor_data_.dims.fill(0);
+        other.tensor_data_.strides.fill(0);
     }
 
     TensorWrapper& operator=(TensorWrapper&& other) noexcept {
@@ -43,8 +51,18 @@ public:
             other.tensor_data_.data = nullptr;
             other.tensor_data_.size = 0;
             other.tensor_data_.rank = 0;
+            other.tensor_data_.dims.fill(0);
+            other.tensor_data_.strides.fill(0);
         }
         return *this;
+    }
+
+    T operator()(size_t i, size_t j) const {
+        if (tensor_data_.layout == MemoryLayout::RowMajor) {
+            return tensor_data_.data[i * tensor_data_.dims[1] + j];
+        } else {
+            return tensor_data_.data[j * tensor_data_.dims[0] + i];
+        }
     }
 
     // Delete copy operations
@@ -53,14 +71,57 @@ public:
 
     // Host data transfer
     void copy_from_host(const HostTensor& host_tensor) {
-        impl::copy_to_device(tensor_data_, host_tensor.data(), host_tensor.size());
+        // If layouts match, do direct copy
+        if ((tensor_data_.layout == MemoryLayout::RowMajor &&
+             host_tensor.layout() == hpc::compute::MemoryLayout::RowMajor) ||
+            (tensor_data_.layout == MemoryLayout::ColumnMajor &&
+             host_tensor.layout() == hpc::compute::MemoryLayout::ColumnMajor)) {
+            impl::copy_to_device(tensor_data_, host_tensor.data(), host_tensor.size());
+            return;
+        }
+
+        // For layout conversion
+        std::vector<T> temp(host_tensor.size());
+        const size_t   rows = tensor_data_.dims[0];
+        const size_t   cols = tensor_data_.dims[1];
+
+        // Convert from row-major to column-major
+        for (size_t i = 0; i < rows; ++i) {
+            for (size_t j = 0; j < cols; ++j) {
+                temp[j * rows + i] = host_tensor.data()[i * cols + j];
+            }
+        }
+
+        impl::copy_to_device(tensor_data_, temp.data(), temp.size());
     }
 
     void copy_to_host(HostTensor& host_tensor) const {
         if (host_tensor.size() != tensor_data_.size) {
             host_tensor = HostTensor(get_dims(), convert_layout_back(tensor_data_.layout));
         }
-        impl::copy_to_host(tensor_data_, host_tensor.data(), host_tensor.size());
+
+        // If layouts match, do direct copy
+        if ((tensor_data_.layout == MemoryLayout::RowMajor &&
+             host_tensor.layout() == hpc::compute::MemoryLayout::RowMajor) ||
+            (tensor_data_.layout == MemoryLayout::ColumnMajor &&
+             host_tensor.layout() == hpc::compute::MemoryLayout::ColumnMajor)) {
+            impl::copy_to_host(tensor_data_, host_tensor.data(), host_tensor.size());
+            return;
+        }
+
+        // For layout conversion
+        std::vector<T> temp(tensor_data_.size);
+        impl::copy_to_host(tensor_data_, temp.data(), temp.size());
+
+        const size_t rows = tensor_data_.dims[0];
+        const size_t cols = tensor_data_.dims[1];
+
+        // Convert from column-major to row-major
+        for (size_t i = 0; i < rows; ++i) {
+            for (size_t j = 0; j < cols; ++j) {
+                host_tensor.data()[i * cols + j] = temp[j * rows + i];
+            }
+        }
     }
 
     // Access to raw CUDA data
@@ -75,13 +136,13 @@ public:
     void zero() {
         impl::zero_tensor(tensor_data_);
     }
-    bool is_contiguous() const {
+    [[nodiscard]] bool is_contiguous() const {
         return impl::is_contiguous(tensor_data_);
     }
-    std::size_t size() const noexcept {
+    [[nodiscard]] std::size_t size() const noexcept {
         return tensor_data_.size;
     }
-    std::size_t rank() const noexcept {
+    [[nodiscard]] std::size_t rank() const noexcept {
         return tensor_data_.rank;
     }
     const std::array<std::size_t, TensorData<T>::MAX_DIMS>& dims() const noexcept {
@@ -96,19 +157,19 @@ private:
                                         host_tensor.dims().begin() + host_tensor.rank());
     }
 
-    std::vector<std::size_t> get_dims() const {
+    [[nodiscard]] std::vector<std::size_t> get_dims() const {
         return std::vector<std::size_t>(tensor_data_.dims.begin(),
                                         tensor_data_.dims.begin() + tensor_data_.rank);
     }
 
-    static MemoryLayout convert_layout(typename HostTensor::Layout layout) {
-        return layout == HostTensor::Layout::RowMajor ? MemoryLayout::RowMajor
-                                                      : MemoryLayout::ColumnMajor;
+    static MemoryLayout convert_layout(hpc::compute::MemoryLayout layout) {
+        return layout == hpc::compute::MemoryLayout::RowMajor ? MemoryLayout::RowMajor
+                                                              : MemoryLayout::ColumnMajor;
     }
 
-    static typename HostTensor::Layout convert_layout_back(MemoryLayout layout) {
-        return layout == MemoryLayout::RowMajor ? HostTensor::Layout::RowMajor
-                                                : HostTensor::Layout::ColumnMajor;
+    static hpc::compute::MemoryLayout convert_layout_back(MemoryLayout layout) {
+        return layout == MemoryLayout::RowMajor ? hpc::compute::MemoryLayout::RowMajor
+                                                : hpc::compute::MemoryLayout::ColumnMajor;
     }
 };
 

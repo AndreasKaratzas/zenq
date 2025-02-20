@@ -1,8 +1,11 @@
 CompileFlags:
   Add:
     [
-      -I/home/iraklis/Documents/andreas/workspace/zenq/include,
-      -I/usr/include/python3.11 -I/home/iraklis/Documents/andreas/workspace/zenq/.venv/lib/python3.11/site-packages/pybind11/include --cuda-path=/usr/local/cuda -Wall,
+      -I${workspaceFolder}/include,
+      -I/usr/include/python3.11 
+      -I${workspaceFolder}/.venv/lib/python3.11/site-packages/pybind11/include 
+      --cuda-path=/usr/local/cuda 
+      -Wall,
       -Wextra,
       -std=c++20,
     ]
@@ -22,7 +25,7 @@ CompileFlags:
       --generate-code*,
       --compiler-options,
     ]
-  CompilationDatabase: "/home/iraklis/Documents/andreas/workspace/zenq/build"
+  CompilationDatabase: "${workspaceFolder}/build"
 Index:
   Background: Build
 Diagnostics:

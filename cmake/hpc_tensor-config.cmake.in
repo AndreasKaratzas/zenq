@@ -1,15 +1,10 @@
-# cmake/hpc_tensor-config.cmake.in
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
+find_dependency(OpenMP)
 
-# Handle dependencies
-if(@CUDA_ENABLED@)
-    find_dependency(CUDAToolkit)
-endif()
-
-if(@OpenMP_CXX_FOUND@)
-    find_dependency(OpenMP)
+if(@HPC_ENABLE_CUDA@)
+    enable_language(CUDA)
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/hpc_tensor-targets.cmake")
