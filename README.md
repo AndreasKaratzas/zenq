@@ -44,6 +44,23 @@ poetry lock
 
 For additional documentation information, follow [poetry](https://python-poetry.org/docs/#installing-with-the-official-installer) official docs.
 
+### Install the backend
+
+To install the backend, use the following command:
+
+```bash
+mkdir -p build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release -DHPC_ENABLE_CUDA=ON ..; make -j
+```
+
+### Run the backend
+
+To run the backend, inside `build` directory, use the following command:
+
+```bash
+./test_main
+```
+
 ### Notes
 
 <div style="border: 1px solid #ddd; padding: 20px; margin: 20px 0;">
