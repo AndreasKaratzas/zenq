@@ -173,6 +173,7 @@
     "pygemm",
     "randn",
     "rtol",
+    "Sobel",
     "stdexcept",
     "stdlib",
     "STREQUAL",

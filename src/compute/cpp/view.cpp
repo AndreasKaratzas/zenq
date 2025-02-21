@@ -32,7 +32,6 @@ typename TensorView<T>::const_reference TensorView<T>::at(
     }
     return data_[compute_offset(indices)];
 }
-
 template <Numeric T>
 bool TensorView<T>::is_contiguous() const noexcept {
     if (rank_ <= 1)
@@ -117,7 +116,7 @@ TensorView<T> TensorView<T>::slice(size_type dim, size_type index) {
     // Fill remaining dimensions with 1
     for (; j < MAX_DIMS; ++j) {
         new_dims[j]    = 1;
-        new_strides[j] = 1;
+        new_strides[j] = 1; // Or any other default value
     }
 
     // Create and return the view

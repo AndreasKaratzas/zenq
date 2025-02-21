@@ -1,11 +1,36 @@
 cmake_minimum_required(VERSION 3.20)
 project(hpc_tensor CUDA CXX)
 
+# Add this line to include the module
+include(CheckCXXCompilerFlag)
+
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Check for AVX512 support
+check_cxx_compiler_flag("-mavx512f" COMPILER_SUPPORTS_AVX512)
+if(COMPILER_SUPPORTS_AVX512)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx512f")
+    add_definitions(-DHAVE_AVX512)
+endif()
+
+# Check for AVX2 support
+check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
+if(COMPILER_SUPPORTS_AVX2)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx2")
+    add_definitions(-DHAVE_AVX2)
+endif()
+
+# Check for AVX support
+check_cxx_compiler_flag("-mavx" COMPILER_SUPPORTS_AVX)
+if(COMPILER_SUPPORTS_AVX)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx")
+    add_definitions(-DHAVE_AVX)
+endif()
 
 # Option to enable/disable CUDA
 option(HPC_ENABLE_CUDA "Enable CUDA support" ON)
@@ -18,7 +43,17 @@ find_package(OpenMP REQUIRED)
 set(CPU_SOURCES
     src/compute/cpp/tensor.cpp
     src/compute/cpp/view.cpp
+    src/compute/cpp/kernel.cpp
+    src/compute/cpp/kernels/conv2d.cpp
 )
+
+# Add CPU optimization flags
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -ffast-math")
+    if(NOT APPLE)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
+    endif()
+endif()
 
 if(HPC_ENABLE_CUDA)
     set(CUDA_SOURCES

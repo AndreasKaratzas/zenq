@@ -32,14 +32,16 @@ public:
     template <typename... Indices>
     reference operator()(Indices... indices) {
         static_assert(sizeof...(Indices) <= MAX_DIMS, "Too many indices");
-        std::array<size_type, MAX_DIMS> idx = {static_cast<size_type>(indices)...};
+        std::array<size_type, MAX_DIMS> idx{}; // Initialize with zeros
+        fill_indices(idx, indices...);         // Use helper
         return at(idx);
     }
 
     template <typename... Indices>
     const_reference operator()(Indices... indices) const {
         static_assert(sizeof...(Indices) <= MAX_DIMS, "Too many indices");
-        std::array<size_type, MAX_DIMS> idx = {static_cast<size_type>(indices)...};
+        std::array<size_type, MAX_DIMS> idx{}; // Initialize with zeros
+        fill_indices(idx, indices...);         // Use helper
         return at(idx);
     }
 
@@ -76,6 +78,15 @@ private:
     MemoryLayout                    layout_;
 
     [[nodiscard]] size_type compute_offset(const std::array<size_type, MAX_DIMS>& indices) const;
+
+    // Helper function for variadic template indices
+    template <typename... Indices>
+    void fill_indices(std::array<size_type, MAX_DIMS>& idx, Indices... indices) const {
+        size_t i = 0;
+        for (size_type index : {static_cast<size_type>(indices)...}) {
+            idx[i++] = index;
+        }
+    }
 };
 
 } // namespace hpc::compute

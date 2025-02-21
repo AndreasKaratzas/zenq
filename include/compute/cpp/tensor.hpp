@@ -1,11 +1,13 @@
 #pragma once
 
+#include <algorithm> // For std::copy and std::fill
 #include <array>
 #include <concepts>
 #include <cstddef>
 #include <initializer_list>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <type_traits>
 #include <vector>
 
@@ -26,7 +28,7 @@ enum class MemoryOrder {
     Packed     // No padding, tightly packed
 };
 
-// Forward declaration for TensorView
+// Forward declaration for TensorView (if you plan to implement it)
 template <Numeric T>
 class TensorView;
 
@@ -56,9 +58,9 @@ public:
     Tensor(Tensor&& other) noexcept;
     Tensor& operator=(Tensor&& other) noexcept;
 
-    // Copy operations - disabled by default
-    Tensor(const Tensor& other)            = delete;
-    Tensor& operator=(const Tensor& other) = delete;
+    // Copy operations - Now IMPLEMENTED
+    Tensor(const Tensor& other);
+    Tensor& operator=(const Tensor& other);
 
     // Destructor
     ~Tensor();
@@ -77,18 +79,20 @@ public:
     template <typename... Indices>
     reference operator()(Indices... indices) {
         static_assert(sizeof...(Indices) <= MAX_DIMS, "Too many indices");
-        std::array<size_type, MAX_DIMS> idx = {static_cast<size_type>(indices)...};
+        std::array<size_type, MAX_DIMS> idx{}; // Initialize with zeros
+        fill_indices(idx, indices...);         // Use a helper function
         return at(idx);
     }
 
     template <typename... Indices>
     const_reference operator()(Indices... indices) const {
         static_assert(sizeof...(Indices) <= MAX_DIMS, "Too many indices");
-        std::array<size_type, MAX_DIMS> idx = {static_cast<size_type>(indices)...};
+        std::array<size_type, MAX_DIMS> idx{}; // Initialize with zeros
+        fill_indices(idx, indices...);         // Use a helper function
         return at(idx);
     }
 
-    // View creation
+    // View creation (placeholders for now)
     TensorView<T> view(std::initializer_list<std::pair<size_type, size_type>> ranges);
     TensorView<T> slice(size_type dim, size_type index);
 
@@ -102,6 +106,13 @@ public:
     [[nodiscard]] const std::array<size_type, MAX_DIMS>& dims() const noexcept {
         return dims_;
     }
+    [[nodiscard]] std::vector<size_type> shape() const noexcept {
+        std::vector<size_type> vec_dims;
+        for (size_t i = 0; i < rank_; ++i) {
+            vec_dims.push_back(dims_[i]);
+        }
+        return vec_dims;
+    }
     [[nodiscard]] const std::array<size_type, MAX_DIMS>& strides() const noexcept {
         return strides_;
     }
@@ -111,12 +122,15 @@ public:
     [[nodiscard]] MemoryOrder order() const noexcept {
         return order_;
     }
-    [[nodiscard]] size_type alignment() const noexcept;
+    [[nodiscard]] size_type alignment() const noexcept; // Declaration here, no definition in header
 
     // Memory operations
     void               zero() noexcept;
     [[nodiscard]] bool is_contiguous() const noexcept;
     void               make_contiguous();
+
+    // Reshape the tensor
+    void reshape(const std::vector<size_type>& new_dims);
 
 private:
     pointer                         data_;
@@ -133,6 +147,15 @@ private:
     [[nodiscard]] size_type compute_offset(const std::array<size_type, MAX_DIMS>& indices) const;
     static pointer          allocate_aligned(size_type size, size_type alignment);
     static void deallocate_aligned(pointer p, MemoryOrder order, size_type alignment) noexcept;
+
+    // Helper function for variadic template indices
+    template <typename... Indices>
+    void fill_indices(std::array<size_type, MAX_DIMS>& idx, Indices... indices) const {
+        size_t i = 0;
+        for (size_type index : {static_cast<size_type>(indices)...}) {
+            idx[i++] = index;
+        }
+    }
 };
 
 } // namespace hpc::compute
