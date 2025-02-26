@@ -256,7 +256,7 @@ ConvImplementation Conv2D<T>::select_implementation() const {
 }
 
 template <typename T>
-Tensor<T> Conv2D<T>::forward(const Tensor<T>& input) const {
+Tensor<T> Conv2D<T>::forward(const Tensor<T>& input, bool return_to_cpu) const {
     LOG_DEBUG("Conv2D forward: input shape=[",
               input.shape()[0],
               ", ",

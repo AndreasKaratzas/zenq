@@ -6,7 +6,7 @@ project(hpc_tensor VERSION 1.0.0 LANGUAGES CUDA CXX)
 # ===================================================================
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -161,6 +161,8 @@ set(CPU_SOURCES
 if(HPC_ENABLE_CUDA)
     set(CUDA_SOURCES
         src/compute/cuda/tensor.cu
+        src/compute/cuda/blas.cu
+        src/compute/cuda/kernels/conv2d.cu
     )
     
     # Ensure CUDA sources are treated as CUDA files
@@ -188,11 +190,33 @@ endfunction()
 add_library(tensor_cpu STATIC ${CPU_SOURCES})
 set_common_target_properties(tensor_cpu)
 
-# Create CUDA library if enabled
+find_library(CUSPARSE_LIBRARY NAMES cusparse PATHS ${CUDA_TOOLKIT_ROOT_DIR}/lib64)
+
 if(HPC_ENABLE_CUDA)
     add_library(tensor_cuda STATIC ${CUDA_SOURCES})
     set_common_target_properties(tensor_cuda)
-    target_link_libraries(tensor_cuda PUBLIC tensor_cpu)
+    
+    # Find cuSPARSE
+    find_library(CUSPARSE_LIBRARY NAMES cusparse PATHS ${CUDA_TOOLKIT_ROOT_DIR}/lib64)
+    if(CUSPARSE_LIBRARY)
+        message(STATUS "Found cuSPARSE: ${CUSPARSE_LIBRARY}")
+        add_library(cusparse_lib SHARED IMPORTED)
+        set_target_properties(cusparse_lib PROPERTIES IMPORTED_LOCATION ${CUSPARSE_LIBRARY})
+    else()
+        message(FATAL_ERROR "cuSPARSE library not found")
+    endif()
+    
+    # Find cuBLAS
+    find_library(CUBLAS_LIBRARY NAMES cublas PATHS ${CUDA_TOOLKIT_ROOT_DIR}/lib64)
+    if(CUBLAS_LIBRARY)
+        message(STATUS "Found cuBLAS: ${CUBLAS_LIBRARY}")
+        add_library(cublas_lib SHARED IMPORTED)
+        set_target_properties(cublas_lib PROPERTIES IMPORTED_LOCATION ${CUBLAS_LIBRARY})
+    else()
+        message(FATAL_ERROR "cuBLAS library not found")
+    endif()
+    
+    target_link_libraries(tensor_cuda PUBLIC tensor_cpu cusparse_lib cublas_lib)
     
     # Set CUDA specific properties
     set_target_properties(tensor_cuda PROPERTIES 

@@ -1,9 +1,6 @@
 #include "compute/cpp/kernels/conv2d.hpp"
 #include "compute/cpp/tensor.hpp"
 #include "compute/cpp/view.hpp"
-#ifdef CUDA_ENABLED
-    #include "compute/cuda/wrapper.hpp"
-#endif
 
 #include <chrono> // For std::chrono::high_resolution_clock
 #include <cmath>  // For std::isnan, std::isinf
@@ -12,20 +9,867 @@
 #include <numeric> // For std::iota, std::fill, std::abs
 #include <type_traits>
 #include <vector>
+#ifdef HPC_LOGGING_ENABLED
+    #include "common/logging.hpp"
+#endif
 
 using namespace hpc::compute;
+using namespace hpc::logging;
+
+#ifdef CUDA_ENABLED
+    #include "compute/cpp/tensor.hpp"
+    #include "compute/cuda/blas.cuh"
+    #include "compute/cuda/kernels/conv2d.cuh"
+    #include "compute/cuda/tensor.cuh"
+    #include "compute/cuda/wrapper.hpp"
+
+using namespace hpc::compute::cuda;
+
+// CUDA-specific Conv2D test class
+template <typename T>
+class CUDAConv2DTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        // Create a 3x3 kernel descriptor with CUDA support
+        kernel = hpc::compute::cuda::make_conv2d<T>(3, // kernel_height
+                                                    3, // kernel_width
+                                                    2, // in_channels
+                                                    2, // out_channels
+                                                    1, // stride
+                                                    1  // padding
+        );
+
+        // Initialize kernel weights with known values
+        std::vector<size_t> weight_dims = {2, 2, 3, 3};
+        Tensor<T>           weights(weight_dims);
+        T*                  w_data = weights.data();
+
+        // Initialize with zeros first
+        std::fill(w_data, w_data + weights.size(), static_cast<T>(0));
+
+        // Set very simple weight patterns to reduce numerical errors
+        // First filter: simple 1.0 at center
+        weights(0, 0, 1, 1) = static_cast<T>(1.0);
+        // Second filter: simple 0.1 at all positions
+        for (size_t kh = 0; kh < 3; ++kh) {
+            for (size_t kw = 0; kw < 3; ++kw) {
+                weights(1, 1, kh, kw) = static_cast<T>(0.1);
+            }
+        }
+
+        kernel->load_weights(std::move(weights));
+    }
+
+    void TearDown() override {
+        // Ensure CUDA resources are properly released
+        cudaDeviceSynchronize();
+    }
+
+    // Reference implementation that runs on CPU for validation
+    Tensor<T> reference_convolution(const Tensor<T>& input,
+                                    const Tensor<T>& weights,
+                                    size_t           stride,
+                                    size_t           padding) {
+        size_t batch_size  = input.shape()[0];
+        size_t in_channels = input.shape()[1];
+        size_t in_height   = input.shape()[2];
+        size_t in_width    = input.shape()[3];
+
+        size_t out_channels  = weights.shape()[0];
+        size_t kernel_height = weights.shape()[2];
+        size_t kernel_width  = weights.shape()[3];
+
+        size_t out_height = (in_height + 2 * padding - kernel_height) / stride + 1;
+        size_t out_width  = (in_width + 2 * padding - kernel_width) / stride + 1;
+
+        Tensor<T> output({batch_size, out_channels, out_height, out_width});
+        std::fill(output.data(), output.data() + output.size(), static_cast<T>(0));
+
+        // Create padded input
+        std::vector<T> padded_input_data((in_height + 2 * padding) * (in_width + 2 * padding) *
+                                             in_channels * batch_size,
+                                         static_cast<T>(0));
+
+        // Copy input data to padded input
+        for (size_t n = 0; n < batch_size; ++n) {
+            for (size_t c = 0; c < in_channels; ++c) {
+                for (size_t h = 0; h < in_height; ++h) {
+                    for (size_t w = 0; w < in_width; ++w) {
+                        size_t padded_idx =
+                            ((n * in_channels + c) * (in_height + 2 * padding) + (h + padding)) *
+                                (in_width + 2 * padding) +
+                            (w + padding);
+                        size_t input_idx = ((n * in_channels + c) * in_height + h) * in_width + w;
+                        padded_input_data[padded_idx] = input.data()[input_idx];
+                    }
+                }
+            }
+        }
+
+        // Perform direct convolution
+        for (size_t n = 0; n < batch_size; ++n) {
+            for (size_t oc = 0; oc < out_channels; ++oc) {
+                for (size_t oh = 0; oh < out_height; ++oh) {
+                    for (size_t ow = 0; ow < out_width; ++ow) {
+                        T sum = static_cast<T>(0);
+                        for (size_t ic = 0; ic < in_channels; ++ic) {
+                            for (size_t kh = 0; kh < kernel_height; ++kh) {
+                                for (size_t kw = 0; kw < kernel_width; ++kw) {
+                                    size_t ih = oh * stride + kh;
+                                    size_t iw = ow * stride + kw;
+
+                                    size_t padded_idx =
+                                        ((n * in_channels + ic) * (in_height + 2 * padding) + ih) *
+                                            (in_width + 2 * padding) +
+                                        iw;
+
+                                    T input_val  = padded_input_data[padded_idx];
+                                    T weight_val = weights(oc, ic, kh, kw);
+                                    sum += input_val * weight_val;
+                                }
+                            }
+                        }
+                        size_t out_idx =
+                            ((n * out_channels + oc) * out_height + oh) * out_width + ow;
+                        output.data()[out_idx] = sum;
+                    }
+                }
+            }
+        }
+
+        return output;
+    }
+
+    // Helper method to access GPU-specific functionality
+    hpc::compute::cuda::Conv2D<T>* cuda_kernel() {
+        return static_cast<hpc::compute::cuda::Conv2D<T>*>(kernel.get());
+    }
+
+    std::unique_ptr<BaseKernel<T>> kernel;
+};
+
+using CUDAConvTypes = ::testing::Types<float, double>;
+TYPED_TEST_SUITE(CUDAConv2DTest, CUDAConvTypes);
+
+TYPED_TEST(CUDAConv2DTest, BasicForwardPass) {
+    // Create input tensor with known values
+    std::vector<size_t> input_dims = {1, 2, 5, 5};
+    Tensor<TypeParam>   input(input_dims);
+
+    // Use simple patterns to reduce numerical issues
+    for (size_t c = 0; c < 2; ++c) {
+        for (size_t h = 0; h < 5; ++h) {
+            for (size_t w = 0; w < 5; ++w) {
+                // First channel: increasing values
+                // Second channel: constant values
+                if (c == 0) {
+                    input(0, c, h, w) = static_cast<TypeParam>(h * 5 + w + 1);
+                } else {
+                    input(0, c, h, w) = static_cast<TypeParam>(10);
+                }
+            }
+        }
+    }
+
+    // Perform forward pass using the CUDA kernel
+    Tensor<TypeParam> output = this->kernel->forward(input);
+
+    // Synchronize to ensure computation is complete
+    cudaDeviceSynchronize();
+
+    // Verify output dimensions
+    const auto& out_shape = output.shape();
+    EXPECT_EQ(out_shape[0], 1u);
+    EXPECT_EQ(out_shape[1], 2u);
+    EXPECT_EQ(out_shape[2], 5u);
+    EXPECT_EQ(out_shape[3], 5u);
+
+    // Check output validity
+    const TypeParam* output_data = output.data();
+    for (size_t i = 0; i < output.size(); ++i) {
+        EXPECT_FALSE(std::isnan(output_data[i])) << "Output contains NaN at index " << i;
+        EXPECT_FALSE(std::isinf(output_data[i])) << "Output contains Inf at index " << i;
+    }
+
+    // Verify key point manually (center of filter at center of image)
+    // With our weight setup, this should match the input value
+    EXPECT_NEAR(output(0, 0, 2, 2), input(0, 0, 2, 2), static_cast<TypeParam>(1e-4))
+        << "Center output pixel doesn't match expected value";
+
+    // Second channel should be approximately sum of surrounding values * 0.1
+    EXPECT_GT(output(0, 1, 2, 2), static_cast<TypeParam>(0))
+        << "Second channel output should be positive";
+}
+
+TYPED_TEST(CUDAConv2DTest, EnhancedNumericalForwardTest) {
+    // Create a specialized kernel with known weights for numerical validation
+    auto num_kernel = hpc::compute::cuda::make_conv2d<TypeParam>(3, // kernel_height
+                                                                 3, // kernel_width
+                                                                 2, // in_channels
+                                                                 2, // out_channels
+                                                                 1, // stride
+                                                                 1  // padding
+    );
+
+    // Create carefully designed weights for arithmetic validation
+    std::vector<size_t> weight_dims = {2, 2, 3, 3};
+    Tensor<TypeParam>   weights(weight_dims);
+    std::fill(weights.data(), weights.data() + weights.size(), static_cast<TypeParam>(0));
+
+    // Set specific weight values for precise calculation validation
+    // First output channel, first input channel: cross pattern
+    weights(0, 0, 0, 1) = static_cast<TypeParam>(1.0); // top middle
+    weights(0, 0, 1, 0) = static_cast<TypeParam>(2.0); // middle left
+    weights(0, 0, 1, 1) = static_cast<TypeParam>(5.0); // center
+    weights(0, 0, 1, 2) = static_cast<TypeParam>(3.0); // middle right
+    weights(0, 0, 2, 1) = static_cast<TypeParam>(4.0); // bottom middle
+
+    // First output channel, second input channel: corners only
+    weights(0, 1, 0, 0) = static_cast<TypeParam>(0.5); // top left
+    weights(0, 1, 0, 2) = static_cast<TypeParam>(0.5); // top right
+    weights(0, 1, 2, 0) = static_cast<TypeParam>(0.5); // bottom left
+    weights(0, 1, 2, 2) = static_cast<TypeParam>(0.5); // bottom right
+
+    // Second output channel: simple values in first row
+    weights(1, 0, 0, 0) = static_cast<TypeParam>(1.0);
+    weights(1, 0, 0, 1) = static_cast<TypeParam>(1.0);
+    weights(1, 0, 0, 2) = static_cast<TypeParam>(1.0);
+
+    // Second output channel: simple values in second input channel
+    weights(1, 1, 1, 1) = static_cast<TypeParam>(2.0); // only center
+
+    num_kernel->load_weights(std::move(weights));
+
+    // Create input with precise known values
+    std::vector<size_t> input_dims = {1, 2, 4, 4};
+    Tensor<TypeParam>   input(input_dims);
+
+    // First channel: grid of increasing values
+    for (size_t h = 0; h < 4; ++h) {
+        for (size_t w = 0; w < 4; ++w) {
+            input(0, 0, h, w) = static_cast<TypeParam>(h * 4 + w + 1);
+        }
+    }
+
+    // Second channel: constant value of 10
+    for (size_t h = 0; h < 4; ++h) {
+        for (size_t w = 0; w < 4; ++w) {
+            input(0, 1, h, w) = static_cast<TypeParam>(10.0);
+        }
+    }
+
+    // Perform forward pass using the kernel
+    Tensor<TypeParam> output = num_kernel->forward(input);
+
+    // Synchronize to ensure computation is complete
+    cudaDeviceSynchronize();
+
+    // Verify output dimensions
+    const auto& out_shape = output.shape();
+    ASSERT_EQ(out_shape[0], 1u);
+    ASSERT_EQ(out_shape[1], 2u);
+    ASSERT_EQ(out_shape[2], 4u);
+    ASSERT_EQ(out_shape[3], 4u);
+
+    // Print the output values for debugging
+    #ifdef HPC_LOGGING_ENABLED
+    LOG_INFO("Output Channel 0:");
+    for (size_t h = 0; h < 4; ++h) {
+        std::stringstream row;
+        for (size_t w = 0; w < 4; ++w) {
+            row << output(0, 0, h, w) << " ";
+        }
+        LOG_INFO(row.str());
+    }
+
+    LOG_INFO("Output Channel 1:");
+    for (size_t h = 0; h < 4; ++h) {
+        std::stringstream row;
+        for (size_t w = 0; w < 4; ++w) {
+            row << output(0, 1, h, w) << " ";
+        }
+        LOG_INFO(row.str());
+    }
+    #endif
+
+    // ======= Manually calculate expected values for specific positions =======
+
+    // Position (1,1) - middle of image
+    // For output channel 0:
+    //   From input channel 0:
+    //     weights(0,0,0,1) * input(0,0,0,1) = 1.0 * 2 = 2
+    //     weights(0,0,1,0) * input(0,0,1,0) = 2.0 * 5 = 10
+    //     weights(0,0,1,1) * input(0,0,1,1) = 5.0 * 6 = 30
+    //     weights(0,0,1,2) * input(0,0,1,2) = 3.0 * 7 = 21
+    //     weights(0,0,2,1) * input(0,0,2,1) = 4.0 * 10 = 40
+    //   From input channel 1:
+    //     weights(0,1,0,0) * input(0,1,0,0) = 0.5 * 10 = 5
+    //     weights(0,1,0,2) * input(0,1,0,2) = 0.5 * 10 = 5
+    //     weights(0,1,2,0) * input(0,1,2,0) = 0.5 * 10 = 5
+    //     weights(0,1,2,2) * input(0,1,2,2) = 0.5 * 10 = 5
+    //   Total: 2 + 10 + 30 + 21 + 40 + 5 + 5 + 5 + 5 = 123
+    TypeParam expected_0_1_1 = static_cast<TypeParam>(123.0);
+
+    // Position (2,2) - bottom right quadrant
+    // For output channel 0:
+    //   From input channel 0:
+    //     weights(0,0,0,1) * input(0,0,1,2) = 1.0 * 7 = 7
+    //     weights(0,0,1,0) * input(0,0,2,1) = 2.0 * 10 = 20
+    //     weights(0,0,1,1) * input(0,0,2,2) = 5.0 * 11 = 55
+    //     weights(0,0,1,2) * input(0,0,2,3) = 3.0 * 12 = 36
+    //     weights(0,0,2,1) * input(0,0,3,2) = 4.0 * 15 = 60
+    //   From input channel 1:
+    //     weights(0,1,0,0) * input(0,1,1,1) = 0.5 * 10 = 5
+    //     weights(0,1,0,2) * input(0,1,1,3) = 0.5 * 10 = 5
+    //     weights(0,1,2,0) * input(0,1,3,1) = 0.5 * 10 = 5
+    //     weights(0,1,2,2) * input(0,1,3,3) = 0.5 * 10 = 5
+    //   Total: 7 + 20 + 55 + 36 + 60 + 5 + 5 + 5 + 5 = 198
+    TypeParam expected_0_2_2 = static_cast<TypeParam>(198.0);
+
+    // Position (0,0) - top left with padding
+    // For output channel 1:
+    //   From input channel 0:
+    //     weights(1,0,0,0) * 0 (padding) = 1.0 * 0 = 0
+    //     weights(1,0,0,1) * 0 (padding) = 1.0 * 0 = 0
+    //     weights(1,0,0,2) * 0 (padding) = 1.0 * 0 = 0
+    //   From input channel 1:
+    //     weights(1,1,1,1) * input(0,1,0,0) = 2.0 * 10 = 20
+    //   Total: 0 + 0 + 0 + 20 = 20
+    TypeParam expected_1_0_0 = static_cast<TypeParam>(20.0);
+
+    // Position (0,2) - top edge with some real inputs for channel 1
+    // For output channel 1:
+    //   From input channel 0:
+    //     weights(1,0,0,0) * 0 (padding) = 1.0 * 0 = 0
+    //     weights(1,0,0,1) * 0 (padding) = 1.0 * 0 = 0
+    //     weights(1,0,0,2) * 0 (padding) = 1.0 * 0 = 0
+    //   From input channel 1:
+    //     weights(1,1,1,1) * input(0,1,0,2) = 2.0 * 10 = 20
+    //   Total: 0 + 0 + 0 + 20 = 20
+    TypeParam expected_1_0_2 = static_cast<TypeParam>(20.0);
+
+    // Check specific manually calculated points
+    const TypeParam tolerance = std::is_same<TypeParam, float>::value
+                                    ? static_cast<TypeParam>(1e-4)
+                                    : static_cast<TypeParam>(1e-10);
+
+    EXPECT_NEAR(output(0, 0, 1, 1), expected_0_1_1, tolerance)
+        << "Validation failed at position (0,0,1,1)";
+
+    EXPECT_NEAR(output(0, 0, 2, 2), expected_0_2_2, tolerance)
+        << "Validation failed at position (0,0,2,2)";
+
+    EXPECT_NEAR(output(0, 1, 0, 0), expected_1_0_0, tolerance)
+        << "Validation failed at position (0,1,0,0)";
+
+    EXPECT_NEAR(output(0, 1, 0, 2), expected_1_0_2, tolerance)
+        << "Validation failed at position (0,1,0,2)";
+}
+
+TYPED_TEST(CUDAConv2DTest, ZeroPaddingConvolution) {
+    // Create a specialized kernel with padding=0
+    auto no_pad_kernel = hpc::compute::cuda::make_conv2d<TypeParam>(3, // kernel_height
+                                                                    3, // kernel_width
+                                                                    2, // in_channels
+                                                                    2, // out_channels
+                                                                    1, // stride
+                                                                    0  // padding = 0
+    );
+
+    // Create weights with simple, easy-to-trace values
+    std::vector<size_t> weight_dims = {2, 2, 3, 3};
+    Tensor<TypeParam>   weights(weight_dims);
+    std::fill(weights.data(), weights.data() + weights.size(), static_cast<TypeParam>(0));
+
+    // Output channel 0, input channel 0: Simple identity filter
+    weights(0, 0, 1, 1) = static_cast<TypeParam>(1.0); // center only
+
+    // Output channel 0, input channel 1: Uniform value
+    for (size_t h = 0; h < 3; ++h) {
+        for (size_t w = 0; w < 3; ++w) {
+            weights(0, 1, h, w) = static_cast<TypeParam>(0.1); // all positions 0.1
+        }
+    }
+
+    // Output channel 1, input channel 0: Horizontal edge detector
+    weights(1, 0, 0, 0) = static_cast<TypeParam>(1.0);
+    weights(1, 0, 0, 1) = static_cast<TypeParam>(2.0);
+    weights(1, 0, 0, 2) = static_cast<TypeParam>(1.0);
+    weights(1, 0, 2, 0) = static_cast<TypeParam>(-1.0);
+    weights(1, 0, 2, 1) = static_cast<TypeParam>(-2.0);
+    weights(1, 0, 2, 2) = static_cast<TypeParam>(-1.0);
+
+    no_pad_kernel->load_weights(std::move(weights));
+
+    // Create a 5x5 input (larger to see boundary effects with no padding)
+    std::vector<size_t> input_dims = {1, 2, 5, 5};
+    Tensor<TypeParam>   input(input_dims);
+
+    // First channel: grid of increasing values
+    for (size_t h = 0; h < 5; ++h) {
+        for (size_t w = 0; w < 5; ++w) {
+            input(0, 0, h, w) = static_cast<TypeParam>(h * 5 + w + 1);
+        }
+    }
+
+    // Second channel: constant value of 5
+    for (size_t h = 0; h < 5; ++h) {
+        for (size_t w = 0; w < 5; ++w) {
+            input(0, 1, h, w) = static_cast<TypeParam>(5.0);
+        }
+    }
+
+    // Perform forward pass
+    Tensor<TypeParam> output = no_pad_kernel->forward(input);
+
+    // Verify output dimensions - with no padding, output should be (input_size - kernel_size + 1)
+    const auto& out_shape = output.shape();
+    ASSERT_EQ(out_shape[0], 1u);
+    ASSERT_EQ(out_shape[1], 2u);
+    ASSERT_EQ(out_shape[2], 3u); // 5 - 3 + 1 = 3
+    ASSERT_EQ(out_shape[3], 3u); // 5 - 3 + 1 = 3
+
+    #ifdef HPC_LOGGING_ENABLED
+    LOG_INFO("Output Channel 0:");
+    for (size_t h = 0; h < 3; ++h) {
+        std::stringstream row;
+        for (size_t w = 0; w < 3; ++w) {
+            row << output(0, 0, h, w) << " ";
+        }
+        LOG_INFO(row.str());
+    }
+
+    LOG_INFO("Output Channel 1:");
+    for (size_t h = 0; h < 3; ++h) {
+        std::stringstream row;
+        for (size_t w = 0; w < 3; ++w) {
+            row << output(0, 1, h, w) << " ";
+        }
+        LOG_INFO(row.str());
+    }
+    #endif
+
+    // ======= Manually calculate expected values for specific positions =======
+
+    // Position (0,0) - top-left of output
+    // For output channel 0:
+    //   From input channel 0:
+    //     Only center weight is non-zero:
+    //     weights(0,0,1,1) * input(0,0,1,1) = 1.0 * 7 = 7
+    //   From input channel 1:
+    //     All weights are 0.1:
+    //     Sum of (0.1 * 5) for 9 positions = 0.1 * 5 * 9 = 4.5
+    //   Total: 7 + 4.5 = 11.5
+    TypeParam expected_0_0_0 = static_cast<TypeParam>(11.5);
+
+    // Position (1,1) - center of output
+    // For output channel 0:
+    //   From input channel 0:
+    //     weights(0,0,1,1) * input(0,0,2,2) = 1.0 * 13 = 13
+    //   From input channel 1:
+    //     weights(0,1,*,*) * input(0,1,*,*) = 0.1 * 5 * 9 = 4.5
+    //   Total: 13 + 4.5 = 17.5
+    TypeParam expected_0_1_1 = static_cast<TypeParam>(17.5);
+
+    // Position (0,0) - top-left of output
+    // For output channel 1 (horizontal edge detector):
+    //   From input channel 0:
+    //     Top row: weights(1,0,0,*) * input(0,0,0,*)
+    //       = 1.0*1 + 2.0*2 + 1.0*3 = 1 + 4 + 3 = 8
+    //     Bottom row: weights(1,0,2,*) * input(0,0,2,*)
+    //       = -1.0*11 + -2.0*12 + -1.0*13 = -11 - 24 - 13 = -48
+    //   Total: 8 - 48 = -40
+    TypeParam expected_1_0_0 = static_cast<TypeParam>(-40.0);
+
+    // Check specific manually calculated points
+    const TypeParam tolerance = std::is_same<TypeParam, float>::value
+                                    ? static_cast<TypeParam>(1e-4)
+                                    : static_cast<TypeParam>(1e-10);
+
+    EXPECT_NEAR(output(0, 0, 0, 0), expected_0_0_0, tolerance)
+        << "Validation failed at position (0,0,0,0)";
+
+    EXPECT_NEAR(output(0, 0, 1, 1), expected_0_1_1, tolerance)
+        << "Validation failed at position (0,0,1,1)";
+
+    EXPECT_NEAR(output(0, 1, 0, 0), expected_1_0_0, tolerance)
+        << "Validation failed at position (0,1,0,0)";
+}
+
+TYPED_TEST(CUDAConv2DTest, BatchProcessing) {
+    // Create multi-batch input with simpler patterns to reduce numerical issues
+    std::vector<size_t> input_dims = {2, 2, 5, 5};
+    Tensor<TypeParam>   input(input_dims);
+
+    // Initialize with different patterns for each batch
+    for (size_t b = 0; b < 2; ++b) {
+        for (size_t c = 0; c < 2; ++c) {
+            for (size_t h = 0; h < 5; ++h) {
+                for (size_t w = 0; w < 5; ++w) {
+                    // First batch: simple increasing pattern
+                    // Second batch: constant pattern
+                    if (b == 0) {
+                        input(b, c, h, w) = static_cast<TypeParam>((c + 1) * (h + 1));
+                    } else {
+                        input(b, c, h, w) = static_cast<TypeParam>((c + 1) * 5.0);
+                    }
+                }
+            }
+        }
+    }
+
+    // Perform forward pass
+    Tensor<TypeParam> output = this->kernel->forward(input);
+
+    // Verify batch dimension
+    const auto& out_shape = output.shape();
+    ASSERT_EQ(out_shape[0], 2u);
+    ASSERT_EQ(out_shape[1], 2u);
+
+    // Verify the outputs are different between batches - just checking a few key points
+    EXPECT_NE(output(0, 0, 2, 2), output(1, 0, 2, 2))
+        << "Output for different batches should be different at center point";
+
+    // Also check corner point
+    EXPECT_NE(output(0, 0, 0, 0), output(1, 0, 0, 0))
+        << "Output for different batches should be different at corner point";
+}
+
+// Test for im2col and col2im operations used in convolution
+TYPED_TEST(CUDAConv2DTest, Im2ColCol2ImOperations) {
+    const size_t batch_size  = 1;
+    const size_t channels    = 3;
+    const size_t height      = 5;
+    const size_t width       = 5;
+    const size_t kernel_size = 3;
+    const size_t padding     = 1;
+    const size_t stride      = 1;
+
+    // Calculate output dimensions
+    const size_t output_height = (height + 2 * padding - kernel_size) / stride + 1;
+    const size_t output_width  = (width + 2 * padding - kernel_size) / stride + 1;
+
+    // Create input tensor
+    Tensor<TypeParam> input({batch_size, channels, height, width});
+
+    // Fill with simple pattern
+    for (size_t c = 0; c < channels; ++c) {
+        for (size_t h = 0; h < height; ++h) {
+            for (size_t w = 0; w < width; ++w) {
+                input(0, c, h, w) = static_cast<TypeParam>(c * 100 + h * 10 + w);
+            }
+        }
+    }
+
+    // Create TensorWrapper for GPU
+    TensorWrapper<TypeParam> cuda_input(input);
+
+    // Create output buffer for im2col
+    TensorWrapper<TypeParam> col_buffer(
+        {batch_size, channels * kernel_size * kernel_size, output_height * output_width});
+
+    // Initialize BLAS if needed
+    BLAS<TypeParam>::initialize();
+
+    // Perform im2col operation
+    BLAS<TypeParam>::im2col(
+        cuda_input, kernel_size, kernel_size, padding, padding, stride, stride, col_buffer);
+
+    // Synchronize
+    cudaDeviceSynchronize();
+
+    // Prepare output tensor for col2im
+    TensorWrapper<TypeParam> cuda_output({batch_size, channels, height, width});
+
+    // Perform col2im operation
+    BLAS<TypeParam>::col2im(col_buffer,
+                            channels,
+                            height,
+                            width,
+                            kernel_size,
+                            kernel_size,
+                            padding,
+                            padding,
+                            stride,
+                            stride,
+                            cuda_output);
+
+    // Synchronize
+    cudaDeviceSynchronize();
+
+    // Create host tensor for verification
+    Tensor<TypeParam> output({batch_size, channels, height, width});
+
+    // Copy data back to host
+    cuda_output.copy_to_host(output);
+
+    // Verify dimensions
+    ASSERT_EQ(output.shape()[0], batch_size);
+    ASSERT_EQ(output.shape()[1], channels);
+    ASSERT_EQ(output.shape()[2], height);
+    ASSERT_EQ(output.shape()[3], width);
+
+    // Verify the round trip conversion (im2col -> col2im should preserve values)
+    // Note: Edges might differ due to padding handling
+    const TypeParam tolerance = std::is_same<TypeParam, float>::value
+                                    ? static_cast<TypeParam>(1e-4)
+                                    : static_cast<TypeParam>(1e-10);
+
+    // Check center values where padding doesn't affect results
+    for (size_t c = 0; c < channels; ++c) {
+        for (size_t h = 1; h < height - 1; ++h) {
+            for (size_t w = 1; w < width - 1; ++w) {
+                EXPECT_NEAR(output(0, c, h, w), input(0, c, h, w), tolerance)
+                    << "im2col->col2im failed to preserve value at (" << c << "," << h << "," << w
+                    << ")";
+            }
+        }
+    }
+
+    // Clean up
+    BLAS<TypeParam>::finalize();
+}
+
+// Test for GEMM operation used in convolution
+TYPED_TEST(CUDAConv2DTest, GEMMOperation) {
+    const size_t m = 16;
+    const size_t n = 32;
+    const size_t k = 24;
+
+    // Create matrices
+    Tensor<TypeParam> A({m, k});
+    Tensor<TypeParam> B({k, n});
+
+    // Fill with simple patterns
+    for (size_t i = 0; i < m; ++i) {
+        for (size_t j = 0; j < k; ++j) {
+            A(i, j) = static_cast<TypeParam>(i * 0.1 + j * 0.01);
+        }
+    }
+
+    for (size_t i = 0; i < k; ++i) {
+        for (size_t j = 0; j < n; ++j) {
+            B(i, j) = static_cast<TypeParam>(i * 0.01 + j * 0.1);
+        }
+    }
+
+    // Create TensorWrapper for GPU
+    TensorWrapper<TypeParam> cuda_A(A);
+    TensorWrapper<TypeParam> cuda_B(B);
+    TensorWrapper<TypeParam> cuda_C({m, n});
+
+    // Initialize BLAS
+    BLAS<TypeParam>::initialize();
+
+    // Perform GEMM operation (C = alpha*A*B + beta*C)
+    BLAS<TypeParam>::gemm(false, false, 1.0, cuda_A, cuda_B, 0.0, cuda_C);
+
+    // Synchronize
+    cudaDeviceSynchronize();
+
+    // Create host tensor to receive result
+    Tensor<TypeParam> C({m, n});
+
+    // Copy data back to host
+    cuda_C.copy_to_host(C);
+
+    // Verify dimensions
+    ASSERT_EQ(C.shape()[0], m);
+    ASSERT_EQ(C.shape()[1], n);
+
+    // Perform CPU-based GEMM for comparison
+    Tensor<TypeParam> expected_C({m, n});
+    std::fill(expected_C.data(), expected_C.data() + expected_C.size(), static_cast<TypeParam>(0));
+
+    for (size_t i = 0; i < m; ++i) {
+        for (size_t j = 0; j < n; ++j) {
+            for (size_t p = 0; p < k; ++p) {
+                expected_C(i, j) += A(i, p) * B(p, j);
+            }
+        }
+    }
+
+    // Compare results
+    const TypeParam tolerance = std::is_same<TypeParam, float>::value
+                                    ? static_cast<TypeParam>(1e-4)
+                                    : static_cast<TypeParam>(1e-10);
+
+    for (size_t i = 0; i < m; ++i) {
+        for (size_t j = 0; j < n; ++j) {
+            EXPECT_NEAR(C(i, j), expected_C(i, j), tolerance)
+                << "GEMM result doesn't match expected at position (" << i << ", " << j << ")";
+        }
+    }
+
+    // Clean up
+    BLAS<TypeParam>::finalize();
+}
+
+TYPED_TEST(CUDAConv2DTest, PerformanceTest) {
+    // Create larger tensors to test performance
+    std::vector<size_t> input_dims = {2, 4, 16, 16};
+    Tensor<TypeParam>   input(input_dims);
+
+    // Initialize with simple pattern for deterministic testing
+    for (size_t b = 0; b < 2; ++b) {
+        for (size_t c = 0; c < 4; ++c) {
+            for (size_t h = 0; h < 16; ++h) {
+                for (size_t w = 0; w < 16; ++w) {
+                    input(b, c, h, w) = static_cast<TypeParam>((c + 1) * (h + w + 1) * 0.1);
+                }
+            }
+        }
+    }
+
+    // Create a medium kernel
+    auto perf_kernel = hpc::compute::cuda::make_conv2d<TypeParam>(3, // kernel_height
+                                                                  3, // kernel_width
+                                                                  4, // in_channels
+                                                                  8, // out_channels
+                                                                  1, // stride
+                                                                  1  // padding
+    );
+
+    // Initialize with simple pattern
+    std::vector<size_t> weight_dims = {8, 4, 3, 3};
+    Tensor<TypeParam>   weights(weight_dims);
+
+    // Use small values to avoid numerical issues
+    std::fill(weights.data(), weights.data() + weights.size(), static_cast<TypeParam>(0.01));
+
+    perf_kernel->load_weights(std::move(weights));
+
+    // Measure execution time (simple approach)
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    // Perform forward pass
+    Tensor<TypeParam> output = perf_kernel->forward(input, true); // Force CPU return
+
+    // Ensure operation is complete
+    cudaDeviceSynchronize();
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+
+    // Verify output dimensions
+    const auto& out_shape = output.shape();
+    ASSERT_EQ(out_shape[0], 2u);
+    ASSERT_EQ(out_shape[1], 8u);
+    ASSERT_EQ(out_shape[2], 16u);
+    ASSERT_EQ(out_shape[3], 16u);
+
+    // Verify the output is valid
+    const TypeParam* output_data = output.data();
+    for (size_t i = 0; i < output.size(); ++i) {
+        EXPECT_FALSE(std::isnan(output_data[i])) << "Output contains NaN at index " << i;
+        EXPECT_FALSE(std::isinf(output_data[i])) << "Output contains Inf at index " << i;
+    }
+
+    // Performance information (not part of test)
+    #ifdef HPC_LOGGING_ENABLED
+    LOG_INFO("CUDA Conv2D Performance Test completed in ", duration, " ms");
+    #endif
+}
+
+// Test for direct GPU to GPU operations without CPU transfer
+TYPED_TEST(CUDAConv2DTest, GPUPipelineTest) {
+    // This test verifies that the CUDA implementation works well in a GPU pipeline
+    const size_t in_channels     = 3;
+    const size_t hidden_channels = 8;
+    const size_t out_channels    = 2;
+    const size_t input_size      = 16;
+    const size_t kernel_size     = 3;
+    const size_t stride          = 1;
+    const size_t padding         = 1;
+
+    // Create two convolution layers
+    auto conv1 = hpc::compute::cuda::make_conv2d<TypeParam>(
+        kernel_size, kernel_size, in_channels, hidden_channels, stride, padding);
+    auto conv2 = hpc::compute::cuda::make_conv2d<TypeParam>(
+        kernel_size, kernel_size, hidden_channels, out_channels, stride, padding);
+
+    // Initialize with simple weights
+    std::vector<size_t> weight_dims1 = {hidden_channels, in_channels, kernel_size, kernel_size};
+    Tensor<TypeParam>   weights1(weight_dims1);
+    std::fill(weights1.data(), weights1.data() + weights1.size(), static_cast<TypeParam>(0.01));
+    conv1->load_weights(std::move(weights1));
+
+    std::vector<size_t> weight_dims2 = {out_channels, hidden_channels, kernel_size, kernel_size};
+    Tensor<TypeParam>   weights2(weight_dims2);
+    std::fill(weights2.data(), weights2.data() + weights2.size(), static_cast<TypeParam>(0.01));
+    conv2->load_weights(std::move(weights2));
+
+    // Create input tensor
+    Tensor<TypeParam> input({1, in_channels, input_size, input_size});
+    for (size_t c = 0; c < in_channels; ++c) {
+        for (size_t h = 0; h < input_size; ++h) {
+            for (size_t w = 0; w < input_size; ++w) {
+                input(0, c, h, w) = static_cast<TypeParam>(c * 0.1 + h * 0.01 + w * 0.001);
+            }
+        }
+    }
+
+    // Create GPU pipeline using new forward_gpu method
+    TensorWrapper<TypeParam> cuda_input(input);
+
+    // Cast to Conv2D to access GPU-specific methods
+    hpc::compute::cuda::Conv2D<TypeParam>* conv1_cuda =
+        static_cast<hpc::compute::cuda::Conv2D<TypeParam>*>(conv1.get());
+    hpc::compute::cuda::Conv2D<TypeParam>* conv2_cuda =
+        static_cast<hpc::compute::cuda::Conv2D<TypeParam>*>(conv2.get());
+
+    // Run GPU-to-GPU pipeline
+    TensorWrapper<TypeParam> hidden     = conv1_cuda->forward_gpu(cuda_input);
+    TensorWrapper<TypeParam> gpu_output = conv2_cuda->forward_gpu(hidden);
+
+    // Get output dimensions to allocate CPU tensor
+    auto              out_shape = conv2_cuda->get_output_shape(input);
+    Tensor<TypeParam> output(out_shape);
+
+    // Copy result back to CPU
+    gpu_output.copy_to_host(output);
+
+    // Verify output dimensions
+    ASSERT_EQ(output.shape()[0], 1u);
+    ASSERT_EQ(output.shape()[1], out_channels);
+    ASSERT_EQ(output.shape()[2], input_size); // Same with padding=1, stride=1
+    ASSERT_EQ(output.shape()[3], input_size);
+
+    // Verify output validity
+    for (size_t i = 0; i < output.size(); ++i) {
+        EXPECT_FALSE(std::isnan(output.data()[i])) << "Output contains NaN at index " << i;
+        EXPECT_FALSE(std::isinf(output.data()[i])) << "Output contains Inf at index " << i;
+    }
+
+    // Compare with doing it in two steps with CPU transfer
+    Tensor<TypeParam> cpu_hidden = conv1->forward(input);
+    Tensor<TypeParam> cpu_output = conv2->forward(cpu_hidden);
+
+    // Results should be nearly identical
+    const TypeParam tolerance = std::is_same<TypeParam, float>::value
+                                    ? static_cast<TypeParam>(1e-4)
+                                    : static_cast<TypeParam>(1e-10);
+
+    for (size_t i = 0; i < output.size(); ++i) {
+        EXPECT_NEAR(output.data()[i], cpu_output.data()[i], tolerance)
+            << "GPU pipeline output differs from CPU pipeline at index " << i;
+    }
+}
+
+#endif // CUDA_ENABLED
 
 template <typename T>
 class Conv2DTest : public ::testing::Test {
 protected:
     void SetUp() override {
         // Create a 3x3 kernel descriptor
-        kernel = make_conv2d<T>(3, // kernel_height
-                                3, // kernel_width
-                                2, // in_channels
-                                2, // out_channels
-                                1, // stride
-                                1  // padding
+        kernel = hpc::compute::make_conv2d<T>(3, // kernel_height
+                                              3, // kernel_width
+                                              2, // in_channels
+                                              2, // out_channels
+                                              1, // stride
+                                              1  // padding
         );
 
         // Initialize kernel weights with known values
@@ -179,12 +1023,12 @@ TYPED_TEST(Conv2DTest, BasicForwardPass) {
 
 TYPED_TEST(Conv2DTest, EnhancedNumericalForwardTest) {
     // Create a specialized kernel with known weights for numerical validation
-    auto num_kernel = make_conv2d<TypeParam>(3, // kernel_height
-                                             3, // kernel_width
-                                             2, // in_channels
-                                             2, // out_channels
-                                             1, // stride
-                                             1  // padding
+    auto num_kernel = hpc::compute::make_conv2d<TypeParam>(3, // kernel_height
+                                                           3, // kernel_width
+                                                           2, // in_channels
+                                                           2, // out_channels
+                                                           1, // stride
+                                                           1  // padding
     );
 
     // Create carefully designed weights for arithmetic validation
@@ -355,12 +1199,12 @@ TYPED_TEST(Conv2DTest, EnhancedNumericalForwardTest) {
 
 TYPED_TEST(Conv2DTest, ZeroPaddingConvolution) {
     // Create a specialized kernel with padding=0
-    auto no_pad_kernel = make_conv2d<TypeParam>(3, // kernel_height
-                                                3, // kernel_width
-                                                2, // in_channels
-                                                2, // out_channels
-                                                1, // stride
-                                                0  // padding = 0
+    auto no_pad_kernel = hpc::compute::make_conv2d<TypeParam>(3, // kernel_height
+                                                              3, // kernel_width
+                                                              2, // in_channels
+                                                              2, // out_channels
+                                                              1, // stride
+                                                              0  // padding = 0
     );
 
     // Create weights with simple, easy-to-trace values
@@ -526,7 +1370,7 @@ TYPED_TEST(Conv2DTest, ZeroPaddingConvolution) {
 
 TYPED_TEST(Conv2DTest, SimpleConvolutionWithSobel) {
     // Create Sobel kernel with padding=1
-    auto sobel_kernel = make_conv2d<TypeParam>(3, 3, 1, 1, 1, 1);
+    auto sobel_kernel = hpc::compute::make_conv2d<TypeParam>(3, 3, 1, 1, 1, 1);
 
     // Initialize Sobel operator weights (horizontal edge detector)
     std::vector<size_t> weight_dims = {1, 1, 3, 3};
@@ -652,12 +1496,12 @@ TYPED_TEST(Conv2DTest, InvalidInput) {
 
 TYPED_TEST(Conv2DTest, PaddingBehavior) {
     // Create a kernel with padding=1
-    auto conv2d = make_conv2d<TypeParam>(3, // kernel_height
-                                         3, // kernel_width
-                                         1, // in_channels
-                                         1, // out_channels
-                                         1, // stride
-                                         1  // padding
+    auto conv2d = hpc::compute::make_conv2d<TypeParam>(3, // kernel_height
+                                                       3, // kernel_width
+                                                       1, // in_channels
+                                                       1, // out_channels
+                                                       1, // stride
+                                                       1  // padding
     );
 
     // Create asymmetric kernel weights to properly test padding
@@ -704,12 +1548,12 @@ TYPED_TEST(Conv2DTest, PaddingBehavior) {
 
 TYPED_TEST(Conv2DTest, StrideTest) {
     // Create a kernel with stride=2
-    auto stride_kernel = make_conv2d<TypeParam>(3, // kernel_height
-                                                3, // kernel_width
-                                                1, // in_channels
-                                                1, // out_channels
-                                                2, // stride
-                                                1  // padding
+    auto stride_kernel = hpc::compute::make_conv2d<TypeParam>(3, // kernel_height
+                                                              3, // kernel_width
+                                                              1, // in_channels
+                                                              1, // out_channels
+                                                              2, // stride
+                                                              1  // padding
     );
 
     // Create identity filter
@@ -765,12 +1609,12 @@ TYPED_TEST(Conv2DTest, PerformanceTest) {
     }
 
     // Create a medium kernel
-    auto perf_kernel = make_conv2d<TypeParam>(3, // kernel_height
-                                              3, // kernel_width
-                                              4, // in_channels
-                                              8, // out_channels
-                                              1, // stride
-                                              1  // padding
+    auto perf_kernel = hpc::compute::make_conv2d<TypeParam>(3, // kernel_height
+                                                            3, // kernel_width
+                                                            4, // in_channels
+                                                            8, // out_channels
+                                                            1, // stride
+                                                            1  // padding
     );
 
     // Initialize with simple pattern
@@ -901,9 +1745,10 @@ EXPECT_EQ(t(1, 2), TypeParam(6));
 #endif
 }
 
-TYPED_TEST(TensorTest, MemoryLayouts){// CPU Test
-                                      {Tensor<TypeParam> row_major({2, 3}, MemoryLayout::RowMajor);
-Tensor<TypeParam> col_major({2, 3}, MemoryLayout::ColumnMajor);
+TYPED_TEST(TensorTest, MemoryLayouts){
+    // CPU Test
+    {Tensor<TypeParam> row_major({2, 3}, hpc::compute::MemoryLayout::RowMajor);
+Tensor<TypeParam> col_major({2, 3}, hpc::compute::MemoryLayout::ColumnMajor);
 
 EXPECT_EQ(row_major.strides()[0], 3);
 EXPECT_EQ(row_major.strides()[1], 1);
@@ -1069,7 +1914,7 @@ TYPED_TEST(TensorTest, ConcurrentOperations) {
 }
 
 TYPED_TEST(TensorTest, LayoutConversion) {
-    Tensor<TypeParam> host_t({3, 3}, MemoryLayout::RowMajor);
+    Tensor<TypeParam> host_t({3, 3}, hpc::compute::MemoryLayout::RowMajor);
     for (size_t i = 0; i < 9; ++i) {
         host_t.data()[i] = TypeParam(i);
     }
@@ -1078,7 +1923,7 @@ TYPED_TEST(TensorTest, LayoutConversion) {
     cuda::TensorWrapper<TypeParam> device_t({3, 3}, cuda::MemoryLayout::ColumnMajor);
     device_t.copy_from_host(host_t);
 
-    Tensor<TypeParam> result({3, 3}, MemoryLayout::ColumnMajor);
+    Tensor<TypeParam> result({3, 3}, hpc::compute::MemoryLayout::ColumnMajor);
     device_t.copy_to_host(result);
 
     // Verify data matches despite different layouts

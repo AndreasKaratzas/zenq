@@ -53,7 +53,8 @@ public:
     BaseKernel& operator=(BaseKernel&&)      = default;
 
     virtual void                    validate_input(const Tensor<T>& input) const = 0;
-    [[nodiscard]] virtual Tensor<T> forward(const Tensor<T>& input) const        = 0;
+    [[nodiscard]] virtual Tensor<T> forward(const Tensor<T>& input,
+                                            bool             return_to_cpu = true) const     = 0;
 
     [[nodiscard]] const KernelDescriptor& descriptor() const {
         return desc_;

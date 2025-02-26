@@ -25,7 +25,7 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(HPC_ENABLE_CUDA)
-    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD 20)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 endif()
 
@@ -40,6 +40,8 @@ set(BENCHMARK_CPU_SOURCES
 if(HPC_ENABLE_CUDA)
     set(BENCHMARK_CUDA_SOURCES
         cuda/tensor_bench.cpp
+        cuda/blas_bench.cpp
+        cuda/conv2d_bench.cpp
     )
 endif()
 

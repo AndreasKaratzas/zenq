@@ -29,7 +29,8 @@ public:
     explicit Conv2D(const KernelDescriptor& desc);
 
     void                           validate_input(const Tensor<T>& input) const override;
-    [[nodiscard]] Tensor<T>        forward(const Tensor<T>& input) const override;
+    [[nodiscard]] Tensor<T>        forward(const Tensor<T>& input,
+                                           bool             return_to_cpu = true) const override;
     void                           load_weights(Tensor<T>&& weights) override;
     [[nodiscard]] const Tensor<T>& weights() const override {
         return weights_;
