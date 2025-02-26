@@ -1,18 +1,47 @@
 CompileFlags:
   Add:
     [
+      # Basic include paths
       -I${workspaceFolder}/include,
-      -I/usr/include/python3.11 
-      -I${workspaceFolder}/.venv/lib/python3.11/site-packages/pybind11/include 
-      --cuda-path=/usr/local/cuda 
+      
+      # Python support
+      -I/usr/include/python3.11,
+      -I${workspaceFolder}/.venv/lib/python3.11/site-packages/pybind11/include,
+      
+      # CUDA support
+      --cuda-path=/usr/local/cuda,
+      -I/usr/local/cuda/include,
+      
+      # OpenMP support
+      -fopenmp,
+      
+      # Warning and standard flags
       -Wall,
       -Wextra,
       -std=c++20,
+      
+      # SIMD instruction set flags
+      -mavx,
+      -mavx2,
+      -msse4.2,
+      -mfma,
+      
+      # Enable HPC features in preprocessor
+      -DHPC_LOGGING_ENABLED,
+      -DHAVE_AVX,
+      -DHAVE_AVX2,
+      -DHAVE_SSE42,
+      -DHAVE_FMA,
     ]
   Remove:
     [
+      # Default warning flags (we'll add our own)
       -W*,
+      
+      # Default standards (we'll set c++20)
       -std=*,
+      
+      # CUDA-specific flags that might confuse clangd
       -rdc=true,
       -forward-unknown-to-host-compiler,
       --options-file,
@@ -26,13 +55,22 @@ CompileFlags:
       --compiler-options,
     ]
   CompilationDatabase: "${workspaceFolder}/build"
+
 Index:
   Background: Build
+
 Diagnostics:
   ClangTidy:
-    Add: modernize*
-    Remove: modernize-use-trailing-return-type
+    Add: 
+      - modernize*
+      - performance*
+      - readability*
+    Remove: 
+      - modernize-use-trailing-return-type
+      - readability-identifier-length
+      - modernize-avoid-c-arrays
   UnusedIncludes: Strict
+  
 InlayHints:
   Designators: Yes
   Enabled: Yes
