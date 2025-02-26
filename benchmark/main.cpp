@@ -15,6 +15,12 @@ int main(int argc, char** argv) {
     LOG_INFO("Starting benchmarks...");
 #endif
 
+#ifdef CUDA_ENABLED
+    #pragma message("CUDA is enabled for benchmarks!")
+#else
+    #pragma message("CUDA is NOT enabled for benchmarks!")
+#endif
+
     // Run benchmarks
     ::benchmark::Initialize(&argc, argv);
     if (::benchmark::ReportUnrecognizedArguments(argc, argv)) {
