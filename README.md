@@ -1,12 +1,6 @@
-# ZenQ: AI Simulator for AMD Accelerators
+# ZenQ: Heterogeneous AI backend
 
-ZenQ is a deep learning framework with optimized implementations of popular AI kernels and a highly accurate simulator for AMD accelerators. It provides a comprehensive profiling tool for the backend and utilizes reinforcement learning to predict the performance of the kernels.
-
-### Outline
-
-1. **Accelerated Backend**: Utilizes AMD ROCm for GPU acceleration and AMD AVX512 for CPU acceleration. Implements kernels commonly used in deep learning.
-2. **Profiler**: Provides a comprehensive profiling tool for the backend.
-3. **Learnt Simulator**: Utilizes reinforcement learning to learn the behavior of the backend and predict the performance of the kernels.
+ZenQ is a deep learning framework with optimized implementations of popular AI kernels. It provides kernels optimized with different intrinsic classes, such as SSE42 and AVX512, and accelerated kernels utilizing CUDA, cuSPARSE, and cuBLAS.
 
 ### Setup `poetry` for Python package management
 
@@ -79,3 +73,9 @@ poetry add --source pytorch_cpu torch torchvision
 ```
 
 </div>
+
+### Project Vision
+
+1. **Accelerated Backend**: Utilizes CUDA for GPU acceleration and AVX512 for CPU acceleration. Implements kernels commonly used in deep learning.
+2. **Profiler**: Provides a comprehensive profiling tool for the backend.
+3. **Learnt Simulator**: Utilizes reinforcement learning to learn the behavior of the backend and predict the performance of the kernels.
